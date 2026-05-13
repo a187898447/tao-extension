@@ -1,0 +1,40 @@
+# Taobao page element selectors
+# Update these if Taobao's UI changes
+
+# Product detail page
+product:
+  buy_now: "#J_LinkBuy, a[title='立即购买'], .tb-btn-buy a, .J_LinkBuy"
+  sku_option: ".tb-sku li, .J_TSaleProp li[data-value], .sku-line .sku-item"
+
+# Shopping cart page
+cart:
+  select_all: "#J_SelectAll2, .select-all input"
+  checkout_btn: "#J_Go, .go-btn a, a[title='结算']"
+
+# Checkout/order confirmation page
+checkout:
+  submit_order: "#J_Go, .go-btn a, a[id*='submit'], button:has-text('提交订单')"
+
+# Terminal blocking indicators (text to detect)
+blocking:
+  terminal:
+    sold_out:
+      - "已售罄"
+      - "卖完了"
+      - "库存不足"
+      - "已抢光"
+      - "该商品已售完"
+    delisted:
+      - "商品已下架"
+      - "不存在"
+      - "已失效"
+
+# Success indicators
+success:
+  url_patterns:
+    - "trade.taobao.com"
+    - "alipay.com"
+  text_patterns:
+    - "订单提交成功"
+    - "付款成功"
+    - "感谢购买"

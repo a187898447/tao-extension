@@ -1,0 +1,25 @@
+{
+  "name": "tao-extension",
+  "version": "1.0.0",
+  "description": "Taobao flash sale auto-purchase CLI tool",
+  "main": "src/index.js",
+  "bin": {
+    "tao": "./src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "keywords": ["taobao", "flash-sale", "automation", "playwright"],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.16.0",
+    "commander": "^14.0.3",
+    "playwright": "^1.60.0",
+    "yaml": "^2.9.0"
+  }
+}
