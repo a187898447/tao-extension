@@ -18,7 +18,9 @@ async function setupNetworkCapture(page, captureFile) {
     // Capture requests related to ordering — match Taobao-specific endpoints
     if (
       url.includes('buy.taobao.com') ||
+      url.includes('buy.tmall.com') ||
       url.includes('trade.taobao.com') ||
+      url.includes('trade.tmall.com') ||
       url.includes('/order/') ||
       url.includes('submitOrder') ||
       url.includes('createOrder') ||

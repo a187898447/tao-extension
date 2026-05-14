@@ -2,30 +2,47 @@ const axios = require('axios');
 const { sleep } = require('./retry');
 
 /**
- * Fetch Taobao server time and return the offset from local time (ms).
+ * Fetch Taobao server time once, returning { offset, rtt }.
  * Positive offset = server is ahead of local.
+ */
+async function fetchTimeOnce() {
+  const start = Date.now();
+  const resp = await axios.get('https://m.taobao.com', {
+    timeout: 8000,
+    validateStatus: () => true,
+    maxRedirects: 0,
+  });
+  const end = Date.now();
+  const serverDate = resp.headers['date'];
+  if (!serverDate) return null;
+  const serverMs = new Date(serverDate).getTime();
+  if (isNaN(serverMs)) return null;
+  const rtt = end - start;
+  const midpoint = (start + end) / 2;
+  return { offset: Math.round(serverMs - midpoint), rtt };
+}
+
+/**
+ * Sample server time multiple times, pick the one with the lowest RTT.
+ * Returns the offset from local time (ms). Positive = server ahead.
  */
 async function syncTaobaoTime() {
   try {
-    const start = Date.now();
-    const resp = await axios.get('https://www.taobao.com', {
-      timeout: 8000,
-      validateStatus: () => true,
-    });
-    const end = Date.now();
-    const serverDate = resp.headers['date'];
-    if (serverDate) {
-      const serverMs = new Date(serverDate).getTime();
-      if (!isNaN(serverMs)) {
-        // Use midpoint of request as the estimated local time when server generated the response
-        const rtt = end - start;
-        const midpoint = (start + end) / 2;
-        const offset = serverMs - midpoint;
-        const sign = offset > 0 ? '+' : '';
-        console.log(`[schedule] 淘宝服务器时间偏移: ${sign}${Math.round(offset)}ms (RTT: ${rtt}ms)`);
-        return Math.round(offset);
-      }
+    const samples = 3;
+    const results = [];
+    for (let i = 0; i < samples; i++) {
+      const r = await fetchTimeOnce();
+      if (r) results.push(r);
+      if (i < samples - 1) await sleep(200);
     }
+    if (results.length === 0) {
+      console.log('[schedule] 无法获取淘宝服务器时间，使用本地时间');
+      return 0;
+    }
+    const best = results.reduce((a, b) => (a.rtt < b.rtt ? a : b));
+    const sign = best.offset > 0 ? '+' : '';
+    console.log(`[schedule] 淘宝服务器时间偏移: ${sign}${best.offset}ms (RTT: ${best.rtt}ms, ${results.length}/${samples}次采样取最优)`);
+    return best.offset;
   } catch {
     console.log('[schedule] 无法获取淘宝服务器时间，使用本地时间');
   }

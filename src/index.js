@@ -161,10 +161,8 @@ program
     console.log(`[tao] 模式: ${config.mode}, profile: ${config.profile}`);
 
     // Sync with Taobao server time before countdown
-    // FIXME: HTTP Date header offset is unreliable, revisit with NTP or API-based approach
-    // console.log('[tao] 同步淘宝服务器时间...');
-    // const timeOffset = await syncTaobaoTime();
-    const timeOffset = 0;
+    console.log('[tao] 同步淘宝服务器时间...');
+    const timeOffset = await syncTaobaoTime();
 
     // Browser mode needs time to launch + navigate + select SKU/cart items + detect button
     // API mode only needs to validate template (sub-second)
