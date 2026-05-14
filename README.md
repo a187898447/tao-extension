@@ -89,8 +89,11 @@ tao schedule --at "10:00:00" --mode browser --use-cart --interactive
 # API 模式定时抢购
 tao schedule --at "10:00:00" --mode api --api-template ~/.taobao-tool/captures/template.json
 
-# 自定义重试参数
-tao schedule --at "10:00:00" --mode browser --product-url "https://..." --retry-interval 100 --retry-window 45
+# 自定义重试参数和结算提前量
+tao schedule --at "10:00:00" --mode browser --product-url "https://..." --retry-interval 100 --retry-window 45 --checkout-lead 1500
+
+# 启用抓包（记录 API 请求用于逆向分析）
+tao schedule --at "10:00:00" --mode browser --product-url "https://..." --capture
 ```
 
 ## 命令参考
@@ -118,7 +121,7 @@ tao schedule --at "10:00:00" --mode browser --product-url "https://..." --retry-
 | `--use-cart` | 使用购物车结算 |
 | `--sku <json>` | SKU 选择，如 `{"颜色":"红色","尺码":"XL"}` |
 | `-p, --profile <name>` | 凭证 profile 名称（默认 `default`） |
-| `--retry-interval <ms>` | 重试间隔（毫秒，默认 200） |
+| `--retry-interval <ms>` | 重试间隔（毫秒，默认 100） |
 | `--retry-window <seconds>` | 重试时间窗口（秒，默认 30） |
 | `--capture` | 启用网络请求抓包 |
 | `--api-template <path>` | API 模板文件路径 |
@@ -135,8 +138,9 @@ tao schedule --at "10:00:00" --mode browser --product-url "https://..." --retry-
 | `--sku <json>` | SKU 选择 |
 | `--at <time>` | 目标时间，格式: `YYYY-MM-DD HH:mm:ss` 或 `HH:mm:ss` |
 | `-p, --profile <name>` | 凭证 profile 名称（默认 `default`） |
-| `--retry-interval <ms>` | 重试间隔（毫秒，默认 200） |
+| `--retry-interval <ms>` | 重试间隔（毫秒，默认 100） |
 | `--retry-window <seconds>` | 重试时间窗口（秒，默认 30） |
+| `--checkout-lead <ms>` | 结算按钮提前点击时间（毫秒，默认 1000） |
 | `--capture` | 启用网络请求抓包 |
 | `--api-template <path>` | API 模板文件路径 |
 | `--headless` | 无头模式运行浏览器 |
@@ -148,11 +152,13 @@ tao schedule --at "10:00:00" --mode browser --product-url "https://..." --retry-
 
 ```yaml
 mode: browser
-retryInterval: 200       # 重试间隔（毫秒）
+retryInterval: 100       # 重试间隔（毫秒）
 retryWindow: 30000       # 重试时间窗口（毫秒）
 profile: default
 headless: false
+capture: false           # 默认关闭，使用 --capture 开启
 leadTime: 10000          # 定时模式提前准备时间（毫秒）
+checkoutLead: 1000       # 结算按钮提前点击时间（毫秒）
 ```
 
 ### 选择器配置 (`config/selectors.yaml`)
