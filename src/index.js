@@ -4,9 +4,9 @@ const { program } = require('commander');
 const { login, checkSession } = require('./shared/auth');
 const { getConfig } = require('./shared/config');
 const { retryClick } = require('./shared/retry');
-const { createBrowser, injectCookies, navigateAndSelectSku, navigateCart, waitForCheckoutPage, logCheckoutFailure, browserPurchase, checkPageResult } = require('./modes/browser');
-const { setupNetworkCapture, apiPurchase } = require('./modes/api');
-const { parseTargetTime, schedulePurchase } = require('./shared/scheduler');
+const { createBrowser, injectCookies, navigateAndSelectSku, navigateCart, detectCheckoutButton, waitForCheckoutPage, logCheckoutFailure, browserPurchase, checkPageResult, clickCheckoutButton, clickBuyNowButton, clickDetectedCheckoutButton, createSubmitClicker } = require('./modes/browser');
+const { setupNetworkCapture, apiPurchase, loadApiTemplate } = require('./modes/api');
+const { syncTaobaoTime, parseTargetTime, schedulePurchase } = require('./shared/scheduler');
 
 program.name('tao').description('淘宝抢购自动化工具').version('1.0.0');
 
@@ -14,11 +14,12 @@ program.name('tao').description('淘宝抢购自动化工具').version('1.0.0');
 program
   .command('login')
   .description('登录淘宝账号并保存凭证')
-  .option('-p, --profile <name>', '凭证 profile 名称', 'default')
+  .option('-p, --profile <name>', '凭证 profile 名称 (默认 default)')
   .option('--headless', '无头模式运行浏览器')
+  .option('--keep-open', '登录后保持浏览器打开，方便手动操作（如勾选购物车）')
   .action(async (opts) => {
     const profile = opts.profile || 'default';
-    const result = await login(profile, !!opts.headless);
+    const result = await login(profile, !!opts.headless, !!opts.keepOpen);
     if (!result.success) process.exit(1);
   });
 
@@ -26,7 +27,7 @@ program
 program
   .command('status')
   .description('查看登录状态')
-  .option('-p, --profile <name>', '凭证 profile 名称', 'default')
+  .option('-p, --profile <name>', '凭证 profile 名称 (默认 default)')
   .action(async (opts) => {
     const profile = opts.profile || 'default';
     console.log(`检查 profile '${profile}' 的登录状态...`);
@@ -43,19 +44,22 @@ program
 program
   .command('buy')
   .description('执行购买（浏览器模式或API模式）')
-  .option('-m, --mode <mode>', '模式: browser 或 api', 'browser')
+  .option('-m, --mode <mode>', '模式: browser 或 api (默认 browser)')
   .option('-u, --product-url <url>', '商品详情页 URL')
   .option('--use-cart', '使用购物车结算')
   .option('--sku <json>', 'SKU 选择，如 {"颜色":"红色","尺码":"XL"}')
-  .option('-p, --profile <name>', '凭证 profile 名称', 'default')
-  .option('--retry-interval <ms>', '重试间隔(毫秒)，默认200', '200')
-  .option('--retry-window <seconds>', '重试时间窗口(秒)，默认30', '30')
+  .option('-p, --profile <name>', '凭证 profile 名称 (默认 default)')
+  .option('--retry-interval <ms>', '重试间隔(毫秒)，默认200')
+  .option('--retry-window <seconds>', '重试时间窗口(秒)，默认30')
   .option('--capture', '启用网络请求抓包')
+  .option('--api-template <path>', 'API模板文件路径')
   .option('--headless', '无头模式运行浏览器')
+  .option('--interactive', '购物车模式下手动勾选商品，按 Enter 继续')
   .action(async (opts) => {
     const config = getConfig({
       ...opts,
       useCart: opts.useCart,
+      interactive: opts.interactive,
     });
 
     if (config.mode === 'api') {
@@ -72,8 +76,8 @@ program
 
     // Browser mode
     console.log('[tao] 浏览器模式购买...');
-    if (!config.productUrl) {
-      console.error('[tao] 浏览器模式需要提供 --product-url');
+    if (!config.useCart && !config.productUrl) {
+      console.error('[tao] 非购物车模式需要提供 --product-url');
       process.exit(1);
     }
 
@@ -91,15 +95,13 @@ program
       capture = setupNetworkCapture(page);
     }
 
-    // Enter retry loop on the checkout page
-    const submitSelector =
-      (config.selectors && config.selectors.checkout && config.selectors.checkout.submit_order) ||
-      '#J_Go';
+    // Dynamic submit clicker — re-detects button on every attempt (immune to React re-renders)
+    const submitClicker = createSubmitClicker(page);
 
     let retryResult;
     try {
-      console.log('[tao] 进入重试循环，在确认页反复点击提交订单...');
-      retryResult = await retryClick(page, config, checkPageResult, submitSelector);
+      console.log('[tao] 进入重试循环，动态检测并点击提交订单...');
+      retryResult = await retryClick(page, config, checkPageResult, submitClicker);
 
       // Save capture data if enabled
       if (capture) {
@@ -123,16 +125,19 @@ program
 program
   .command('schedule')
   .description('定时抢购')
-  .option('-m, --mode <mode>', '模式: browser 或 api', 'browser')
+  .option('-m, --mode <mode>', '模式: browser 或 api (默认 browser)')
   .option('-u, --product-url <url>', '商品详情页 URL')
   .option('--use-cart', '使用购物车结算')
   .option('--sku <json>', 'SKU 选择')
   .option('--at <time>', '目标时间，格式: "YYYY-MM-DD HH:mm:ss" 或 "HH:mm:ss"')
-  .option('-p, --profile <name>', '凭证 profile 名称', 'default')
-  .option('--retry-interval <ms>', '重试间隔(毫秒)，默认200', '200')
-  .option('--retry-window <seconds>', '重试时间窗口(秒)，默认30', '30')
+  .option('-p, --profile <name>', '凭证 profile 名称 (默认 default)')
+  .option('--retry-interval <ms>', '重试间隔(毫秒)，默认200')
+  .option('--retry-window <seconds>', '重试时间窗口(秒)，默认30')
   .option('--capture', '启用网络请求抓包')
+  .option('--api-template <path>', 'API模板文件路径')
   .option('--headless', '无头模式运行浏览器')
+  .option('--interactive', '购物车模式下手动勾选商品，按 Enter 继续')
+  .option('--checkout-lead <ms>', '结算按钮提前点击时间(毫秒)，默认1000')
   .action(async (opts) => {
     if (!opts.at) {
       console.error('[tao] schedule 需要 --at 参数指定目标时间');
@@ -149,22 +154,34 @@ program
     const config = getConfig({
       ...opts,
       useCart: opts.useCart,
+      interactive: opts.interactive,
     });
 
     console.log(`[tao] 定时抢购模式，目标时间: ${targetTime.toLocaleString()}`);
     console.log(`[tao] 模式: ${config.mode}, profile: ${config.profile}`);
 
-    // Browser mode needs time to launch + navigate + select SKU/cart items
+    // Sync with Taobao server time before countdown
+    // FIXME: HTTP Date header offset is unreliable, revisit with NTP or API-based approach
+    // console.log('[tao] 同步淘宝服务器时间...');
+    // const timeOffset = await syncTaobaoTime();
+    const timeOffset = 0;
+
+    // Browser mode needs time to launch + navigate + select SKU/cart items + detect button
     // API mode only needs to validate template (sub-second)
     const leadTime = config.leadTime || (config.mode === 'browser' ? 10000 : 1000);
+    // Interactive cart mode: skip countdown, open browser immediately for manual selection
+    const prepareImmediately = !!(config.useCart && config.interactive);
+
+    const checkoutLead = config.checkoutLead || 1000;
 
     try {
       await schedulePurchase({
         targetTime,
         leadTimeMs: leadTime,
+        timeOffset,
+        prepareImmediately,
+        advanceMs: checkoutLead,
         prepare: async () => {
-          // For browser mode, launch browser and navigate to product/cart page early
-          // (but do NOT click "立即购买"/"结算" yet — buttons only appear at sale start)
           if (config.mode === 'browser') {
             if (!config.productUrl && !config.useCart) {
               throw new Error('浏览器模式需要提供 --product-url');
@@ -179,7 +196,12 @@ program
               const page = await context.newPage();
               const allSelectors = config.selectors || {};
               if (config.useCart) {
-                await navigateCart(page, allSelectors);
+                await navigateCart(page, allSelectors, !!config.interactive);
+                // Pre-detect checkout button so it's confirmed ready before target time
+                const btnReady = await detectCheckoutButton(page, allSelectors);
+                if (!btnReady) {
+                  console.log('[tao] 结算按钮未就绪，将在执行阶段重试查找...');
+                }
               } else {
                 const productSelectors = allSelectors.product || {};
                 const skuOptions = config.sku
@@ -195,8 +217,7 @@ program
             }
           }
           // For API mode, validate the template exists before waiting
-          const { loadApiTemplate } = require('./modes/api');
-          const template = loadApiTemplate();
+          const template = loadApiTemplate(config.apiTemplate);
           if (!template) {
             throw new Error('API模板数据不存在，请先用 tao buy --capture 抓包');
           }
@@ -207,16 +228,15 @@ program
             const { page, browser } = prepResult;
             const allSelectors = config.selectors || {};
 
-            // Click the appropriate button to reach checkout at target time
+            // Click the appropriate button to reach checkout at target time.
+            // For cart mode: use pre-detected button (fast, no strategy search).
+            // For product mode: run full strategy search since we didn't pre-detect.
             if (config.useCart) {
-              const checkoutSelector = (allSelectors.cart && allSelectors.cart.checkout_btn) || '#J_Go';
               console.log('[browser] 点击"结算"');
-              await page.click(checkoutSelector);
+              await clickDetectedCheckoutButton(page, allSelectors);
             } else {
-              const productSelectors = allSelectors.product || {};
-              const buyBtnSelector = productSelectors.buy_now || '#J_LinkBuy';
               console.log('[browser] 点击"立即购买"');
-              await page.click(buyBtnSelector);
+              await clickBuyNowButton(page, allSelectors);
             }
             console.log('[browser] 已点击，等待跳转到确认页...');
 
@@ -234,13 +254,12 @@ program
               capture = setupNetworkCapture(page);
             }
 
-            const submitSelector =
-              (allSelectors.checkout && allSelectors.checkout.submit_order) || '#J_Go';
+            const submitClicker = createSubmitClicker(page);
 
-            console.log('[tao] 进入重试循环，在确认页反复点击提交订单...');
+            console.log('[tao] 进入重试循环，动态检测并点击提交订单...');
             let retryResult;
             try {
-              retryResult = await retryClick(page, config, checkPageResult, submitSelector);
+              retryResult = await retryClick(page, config, checkPageResult, submitClicker);
               if (capture) capture.save();
             } finally {
               await browser.close();
@@ -255,7 +274,6 @@ program
           }
 
           // API mode
-          const { apiPurchase } = require('./modes/api');
           const apiResult = await apiPurchase(config);
           if (apiResult.success) {
             console.log(`[tao] 购买成功！尝试次数: ${apiResult.attempts}`);

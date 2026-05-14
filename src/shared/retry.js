@@ -59,35 +59,64 @@ async function retryLoop(options = {}) {
 }
 
 /**
- * Browser-mode retry: repeatedly click a selector and check page result.
+ * Browser-mode retry: repeatedly click and check result.
  *
  * @param {import('playwright').Page} page
  * @param {Object} config
  * @param {Function} checkFn - function(page, config) => { success, retryable?, reason? }
- * @param {string} clickSelector - CSS selector for the button to click
+ * @param {string|Function} clickSelector - CSS selector string, or an async function
+ *   that performs the click (for dynamic per-attempt element detection).
  * @returns {Promise<import('playwright').Page>} - the page (may have navigated)
  */
 async function retryClick(page, config, checkFn, clickSelector) {
   const interval = config.retryInterval || 200;
   const windowMs = config.retryWindow || 30000;
+  const t0 = Date.now();
+  const dynamicClicker = typeof clickSelector === 'function' ? clickSelector : null;
+
+  let clickFailedLogged = false;
 
   const result = await retryLoop({
     interval,
     window: windowMs,
     async attempt() {
-      // Use force:true — brainless clicking, don't check actionability.
-      // If the button doesn't exist or is hidden, this click is a harmless no-op.
-      try {
-        await page.click(clickSelector, { force: true, noWaitAfter: true, timeout: 500 });
-        await page.waitForTimeout(50);
-      } catch {
-        // Click may have failed because page navigated — check result anyway
+      // Dynamic clicker: re-detects the button on every attempt (immune to React re-renders)
+      if (dynamicClicker) {
+        try {
+          await dynamicClicker();
+          await page.waitForTimeout(30);
+        } catch (err) {
+          // Navigation / context-destroyed errors are normal (order submitted → redirect)
+          if (!clickFailedLogged && !err.message.includes('Execution context was destroyed')
+              && !err.message.includes('Target page, context or browser has been closed')) {
+            console.log(`[retry] 动态点击失败: ${err.message.substring(0, 100)}`);
+            clickFailedLogged = true;
+          }
+        }
+      } else {
+        // Static selector: straightforward Playwright click
+        try {
+          await page.click(clickSelector, { force: true, noWaitAfter: true, timeout: 500 });
+          await page.waitForTimeout(50);
+        } catch (err) {
+          if (!clickFailedLogged) {
+            console.log(`[retry] 点击 ${clickSelector} 失败: ${err.message.substring(0, 100)}`);
+            clickFailedLogged = true;
+          }
+        }
       }
-      return checkFn(page, config);
+
+      try {
+        return await checkFn(page, config);
+      } catch (err) {
+        // Page may be navigating (order submitted → redirect), treat as retryable
+        return { success: false, retryable: true, reason: `check error (retryable): ${err.message}` };
+      }
     },
   });
 
-  console.log(`[retry] 完成: ${result.success ? '成功' : '失败'}, 尝试次数: ${result.attempts}`);
+  const elapsed = Date.now() - t0;
+  console.log(`[retry] ${result.success ? '成功' : '失败'} | 总耗时:${elapsed}ms 尝试:${result.attempts}`);
   return result;
 }
 

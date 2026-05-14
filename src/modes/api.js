@@ -110,10 +110,11 @@ function findOrderRequest(capturedData) {
 /**
  * Build order request from template and config.
  */
-function buildOrderRequest(template, config) {
+async function buildOrderRequest(template, config, getCookies) {
   if (!template) return null;
 
-  const cookies = loadSessionCookies(config.profile || 'default');
+  const fetchCookies = getCookies || loadSessionCookies;
+  const cookies = await fetchCookies(config.profile || 'default');
   if (!cookies) return null;
 
   const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
@@ -169,7 +170,7 @@ async function apiPurchase(config) {
 
   console.log(`[api] 使用下单接口: ${orderTemplate.url}`);
 
-  const requestConfig = buildOrderRequest(orderTemplate, config);
+  const requestConfig = await buildOrderRequest(orderTemplate, config);
   if (!requestConfig) {
     return { success: false, reason: 'failed to build request' };
   }
@@ -189,7 +190,7 @@ async function apiPurchase(config) {
     () => instance.request({
       url: requestConfig.url,
       method: requestConfig.method,
-      headers: { ...instance.defaults.headers, ...requestConfig.headers },
+      headers: requestConfig.headers,
       data: requestConfig.data,
     }),
     config,
@@ -222,5 +223,7 @@ async function apiPurchase(config) {
 module.exports = {
   setupNetworkCapture,
   loadApiTemplate,
+  findOrderRequest,
+  buildOrderRequest,
   apiPurchase,
 };

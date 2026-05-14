@@ -9,12 +9,13 @@ const PROJECT_CONFIG_DIR = path.join(__dirname, '..', '..', 'config');
 
 const DEFAULTS = {
   mode: 'browser',
-  retryInterval: 200,
+  retryInterval: 100,
   retryWindow: 30000,
   profile: 'default',
   headless: false,
   capture: false,
   leadTime: 10000, // browser mode lead time before target (ms)
+  checkoutLead: 1000, // ms — click checkout this many ms before target time
 };
 
 function loadProjectConfig(filename) {
@@ -39,27 +40,28 @@ function loadUserConfig() {
 function mergeConfig(fileConfig, cliOptions) {
   const merged = { ...DEFAULTS, ...fileConfig };
 
-  // Only override with CLI options when user explicitly set them
-  // (i.e., the value differs from DEFAULTS — Commander's default doesn't count)
-  if (cliOptions.mode && cliOptions.mode !== DEFAULTS.mode) {
-    merged.mode = cliOptions.mode;
+  // CLI overrides — only apply when explicitly provided (not undefined)
+  if (cliOptions.mode !== undefined) merged.mode = cliOptions.mode;
+  if (cliOptions.retryInterval !== undefined) {
+    const ri = parseInt(cliOptions.retryInterval, 10);
+    if (!isNaN(ri)) merged.retryInterval = ri;
   }
-  const ri = parseInt(cliOptions.retryInterval, 10);
-  if (!isNaN(ri) && ri !== DEFAULTS.retryInterval) {
-    merged.retryInterval = ri;
+  if (cliOptions.retryWindow !== undefined) {
+    const rw = parseInt(cliOptions.retryWindow, 10);
+    if (!isNaN(rw)) merged.retryWindow = rw * 1000; // CLI accepts seconds, store as ms
   }
-  const rw = parseInt(cliOptions.retryWindow, 10);
-  if (!isNaN(rw) && rw !== DEFAULTS.retryWindow / 1000) {
-    merged.retryWindow = rw * 1000; // CLI accepts seconds, store as ms
-  }
-  if (cliOptions.profile && cliOptions.profile !== DEFAULTS.profile) {
-    merged.profile = cliOptions.profile;
-  }
+  if (cliOptions.profile !== undefined) merged.profile = cliOptions.profile;
   if (cliOptions.useCart !== undefined) merged.useCart = cliOptions.useCart;
+  if (cliOptions.interactive !== undefined) merged.interactive = cliOptions.interactive;
   if (cliOptions.headless !== undefined) merged.headless = cliOptions.headless;
   if (cliOptions.capture !== undefined) merged.capture = cliOptions.capture;
   if (cliOptions.productUrl) merged.productUrl = cliOptions.productUrl;
   if (cliOptions.sku) merged.sku = cliOptions.sku;
+  if (cliOptions.apiTemplate) merged.apiTemplate = cliOptions.apiTemplate;
+  if (cliOptions.checkoutLead !== undefined) {
+    const cl = parseInt(cliOptions.checkoutLead, 10);
+    if (!isNaN(cl)) merged.checkoutLead = cl;
+  }
 
   return merged;
 }

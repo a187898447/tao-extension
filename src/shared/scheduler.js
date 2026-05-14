@@ -1,4 +1,36 @@
+const axios = require('axios');
 const { sleep } = require('./retry');
+
+/**
+ * Fetch Taobao server time and return the offset from local time (ms).
+ * Positive offset = server is ahead of local.
+ */
+async function syncTaobaoTime() {
+  try {
+    const start = Date.now();
+    const resp = await axios.get('https://www.taobao.com', {
+      timeout: 8000,
+      validateStatus: () => true,
+    });
+    const end = Date.now();
+    const serverDate = resp.headers['date'];
+    if (serverDate) {
+      const serverMs = new Date(serverDate).getTime();
+      if (!isNaN(serverMs)) {
+        // Use midpoint of request as the estimated local time when server generated the response
+        const rtt = end - start;
+        const midpoint = (start + end) / 2;
+        const offset = serverMs - midpoint;
+        const sign = offset > 0 ? '+' : '';
+        console.log(`[schedule] 淘宝服务器时间偏移: ${sign}${Math.round(offset)}ms (RTT: ${rtt}ms)`);
+        return Math.round(offset);
+      }
+    }
+  } catch {
+    console.log('[schedule] 无法获取淘宝服务器时间，使用本地时间');
+  }
+  return 0;
+}
 
 /**
  * Parse a time string into a Date object.
@@ -35,56 +67,79 @@ function parseTargetTime(timeStr) {
  *
  * @param {Date} targetTime
  * @param {number} leadTimeMs - How many ms before target to start preparation
- * @param {Function} prepare - Async function called at (target - leadTimeMs)
+ * @param {Function} prepare - Async function called at (target - leadTimeMs), or immediately if prepareImmediately
  * @param {Function} execute - Async function called exactly at target time
+ * @param {number} timeOffset - Server time offset (ms), positive = server ahead
+ * @param {boolean} prepareImmediately - Skip countdown, call prepare right away (for interactive mode)
  * @returns {Promise<any>} - The result of execute()
  */
-async function schedulePurchase({ targetTime, leadTimeMs, prepare, execute }) {
+async function schedulePurchase({ targetTime, leadTimeMs, prepare, execute, timeOffset = 0, prepareImmediately = false, advanceMs = 0 }) {
   const targetMs = targetTime.getTime();
 
-  // Validate
-  if (targetMs <= Date.now()) {
+  // serverNow = local time + offset (offset > 0 means server is ahead)
+  function serverNow() { return Date.now() + timeOffset; }
+
+  // Validate using server-adjusted time
+  if (targetMs <= serverNow()) {
     throw new Error('目标时间已过，请检查时间设置');
   }
 
-  const leadTime = leadTimeMs || 5000;
-  const prepareAt = targetMs - leadTime;
+  if (timeOffset !== 0) {
+    console.log(`[schedule] 使用淘宝服务器时间 (偏移 ${timeOffset > 0 ? '+' : ''}${timeOffset}ms)`);
+  }
 
-  // Calculate wait time
-  let waitMs = prepareAt - Date.now();
+  if (!prepareImmediately) {
+    const leadTime = leadTimeMs || 5000;
+    const prepareAt = targetMs - leadTime;
 
-  if (waitMs > 0) {
-    console.log(`[schedule] 目标时间: ${targetTime.toLocaleString()}`);
-    console.log(`[schedule] 将在 ${new Date(prepareAt).toLocaleString()} 开始准备`);
-    console.log(`[schedule] 等待中...`);
+    // Calculate wait time using server-adjusted clock
+    let waitMs = prepareAt - serverNow();
 
-    // Countdown loop
-    while (Date.now() < prepareAt) {
-      const remaining = Math.max(0, prepareAt - Date.now());
-      process.stdout.write(
-        `\r[schedule] 距离准备阶段: ${formatDuration(remaining)}  `);
-      await sleep(Math.min(1000, remaining));
+    if (waitMs > 0) {
+      console.log(`[schedule] 目标时间: ${targetTime.toLocaleString()}`);
+      console.log(`[schedule] 将在 ${new Date(prepareAt).toLocaleString()} 开始准备`);
+      console.log(`[schedule] 等待中...`);
+
+      // Countdown loop
+      while (serverNow() < prepareAt) {
+        const remaining = Math.max(0, prepareAt - serverNow());
+        process.stdout.write(
+          `\r[schedule] 距离准备阶段: ${formatDuration(remaining)}  `);
+        await sleep(Math.min(1000, remaining));
+      }
+      console.log();
     }
-    console.log();
+  } else {
+    console.log(`[schedule] 交互模式 — 立即启动准备阶段`);
+    console.log(`[schedule] 目标时间: ${targetTime.toLocaleString()}`);
   }
 
   // Preparation phase
   console.log('[schedule] 开始准备...');
   const prepareResult = await prepare();
 
-  // Wait exactly until target time, then execute
-  const remainingUntilTarget = targetMs - Date.now();
-  if (remainingUntilTarget > 0) {
-    console.log(
-      `[schedule] 准备完成，距目标时间: ${formatDuration(remainingUntilTarget)}`
-    );
+  // After preparation, verify target hasn't passed
+  const remainingUntilTarget = targetMs - serverNow();
+  if (remainingUntilTarget < 0) {
+    throw new Error('目标时间在准备阶段已过，请提前启动');
+  }
 
-    // Fine-grained waiting for the last few seconds
-    while (Date.now() < targetMs) {
-      const remaining = targetMs - Date.now();
+  // Calculate execute time: advanceMs before target (e.g., 1000ms early for checkout)
+  const executeAt = targetMs - advanceMs;
+  const remainingUntilExecute = executeAt - serverNow();
+
+  if (remainingUntilExecute > 0) {
+    const label = advanceMs > 0
+      ? `准备完成，距提前执行: ${formatDuration(remainingUntilExecute)} (目标时间前${advanceMs}ms)`
+      : `准备完成，距目标时间: ${formatDuration(remainingUntilExecute)}`;
+    console.log(`[schedule] ${label}`);
+
+    // Fine-grained waiting
+    while (serverNow() < executeAt) {
+      const remaining = executeAt - serverNow();
       if (remaining <= 50) {
         // Spin-wait for last 50ms for precision
-        while (Date.now() < targetMs);
+        while (serverNow() < executeAt);
         break;
       }
       process.stdout.write(
@@ -94,7 +149,7 @@ async function schedulePurchase({ targetTime, leadTimeMs, prepare, execute }) {
     console.log();
   }
 
-  // Execute at target time
+  // Execute (advanceMs before target, or exactly at target if advanceMs=0)
   console.log('[schedule] 触发！执行购买...');
   const result = await execute(prepareResult);
 
@@ -113,6 +168,7 @@ function formatDuration(ms) {
 }
 
 module.exports = {
+  syncTaobaoTime,
   parseTargetTime,
   schedulePurchase,
 };

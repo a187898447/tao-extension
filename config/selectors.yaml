@@ -8,8 +8,8 @@ product:
 
 # Shopping cart page
 cart:
-  select_all: "#J_SelectAll2, .select-all input"
-  checkout_btn: "#J_Go, .go-btn a, a[title='结算']"
+  select_all: "#J_SelectAll2, .select-all input, .cart-checkbox .all-check, input[name='selectAll']"
+  checkout_btn: "#J_Go, .go-btn, a[title='结算'], .settlement-btn, .checkout-btn, button:has-text('结算')"
 
 # Checkout/order confirmation page
 checkout:

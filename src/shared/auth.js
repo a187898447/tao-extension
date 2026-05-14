@@ -1,4 +1,6 @@
-const { chromium } = require('playwright');
+const axios = require('axios');
+const readline = require('readline');
+const { createBrowser } = require('./browser-launcher');
 const { saveSession, loadSession, sessionExists } = require('./session');
 
 const LOGIN_URL = 'https://login.taobao.com/member/login.jhtml';
@@ -14,36 +16,16 @@ function cookiesContainAuth(cookies) {
   return AUTH_COOKIE_NAMES.some(n => names.has(n));
 }
 
-async function launchLoginBrowser(headless) {
-  const browser = await chromium.launch({
-    headless,
-    args: [
-      '--disable-blink-features=AutomationControlled',
-      '--no-sandbox',
-      '--disable-features=TranslateUI',
-    ],
-  });
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-    userAgent:
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    locale: 'zh-CN',
-  });
-
-  // Override navigator.webdriver
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-  });
-
-  return { browser, context };
+function isLoggedIn(url) {
+  return !url.includes('login.taobao.com');
 }
 
-async function login(profile, headless = false) {
+async function login(profile, headless = false, keepOpen = false) {
   console.log(`[auth] 启动浏览器，请在浏览器中手动登录淘宝账号...`);
   console.log(`[auth] 支持扫码登录或账号密码登录，包括验证码验证`);
   console.log(`[auth] 登录超时时间: ${LOGIN_TIMEOUT_MS / 60000} 分钟`);
 
-  const { browser, context } = await launchLoginBrowser(headless);
+  const { browser, context } = await createBrowser({ headless });
 
   try {
     const page = await context.newPage();
@@ -51,18 +33,38 @@ async function login(profile, headless = false) {
 
     const startTime = Date.now();
 
-    // Poll for auth cookies
+    // Poll for login completion (page redirects away from login URL)
     while (Date.now() - startTime < LOGIN_TIMEOUT_MS) {
       await page.waitForTimeout(POLL_INTERVAL_MS);
-      const cookies = await context.cookies();
 
-      if (cookiesContainAuth(cookies)) {
-        // Brief wait to ensure all cookies are set
+      if (isLoggedIn(page.url())) {
+        // Wait for post-redirect cookies to settle
         await page.waitForTimeout(3000);
         const finalCookies = await context.cookies();
+
+        // Double-check: must have auth cookies
+        if (!cookiesContainAuth(finalCookies)) {
+          console.log('[auth] 页面已跳转但未检测到认证 cookie，继续等待...');
+          continue;
+        }
+
         saveSession(profile, finalCookies);
         console.log(`[auth] 登录成功！凭证已保存到 profile: '${profile}'`);
         console.log(`[auth] cookies 数量: ${finalCookies.length}`);
+
+        if (keepOpen) {
+          console.log('[auth] 浏览器保持打开，你可以去购物车勾选商品');
+          console.log('[auth] 完成后按 Enter 键退出（购物车勾选状态已同步到服务器，新浏览器会继承）');
+          // Wait for user to press Enter in the terminal
+          await new Promise((resolve) => {
+            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+            rl.on('line', () => {
+              rl.close();
+              resolve();
+            });
+          });
+        }
+
         return { success: true, cookies: finalCookies };
       }
     }
@@ -70,13 +72,13 @@ async function login(profile, headless = false) {
     console.error(`[auth] 登录超时 (${LOGIN_TIMEOUT_MS / 60000} 分钟)`);
     return { success: false, reason: 'timeout' };
   } finally {
-    await browser.close();
+    if (!keepOpen) {
+      await browser.close();
+    }
   }
 }
 
 async function checkSession(profile) {
-  const axios = require('axios');
-
   if (!sessionExists(profile)) {
     return { valid: false, reason: 'no session file' };
   }
@@ -86,7 +88,6 @@ async function checkSession(profile) {
     return { valid: false, reason: 'empty cookies' };
   }
 
-  // Make a lightweight authenticated request to check session
   const cookieHeader = session.cookies
     .map(c => `${c.name}=${c.value}`)
     .join('; ');
@@ -98,17 +99,22 @@ async function checkSession(profile) {
         'User-Agent':
           'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       },
-      maxRedirects: 5,
+      maxRedirects: 0,
       timeout: 15000,
       validateStatus: () => true,
     });
 
-    // If redirected to login page, session is invalid
-    if (resp.request._redirectCount > 0) {
-      const finalUrl = resp.request.res.responseUrl || '';
-      if (finalUrl.includes('login.taobao.com')) {
+    // Check if we're being redirected to the login page
+    if (resp.status >= 300 && resp.status < 400) {
+      const location = resp.headers.location || '';
+      if (location.includes('login.taobao.com')) {
         return { valid: false, reason: 'redirected to login' };
       }
+      // Non-login redirect (risk control / CDN / region) — can't verify session
+      if (location) {
+        return { valid: false, reason: `unexpected redirect to ${location}` };
+      }
+      return { valid: false, reason: 'unexpected redirect with no location header' };
     }
 
     return { valid: true };
