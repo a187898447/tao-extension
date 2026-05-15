@@ -345,7 +345,12 @@ async function clickDetectedCheckoutButton(page, selectors) {
     const preBtn = page.locator(`[${preAttr}="true"]`);
     if (await preBtn.count() > 0) {
       await preBtn.first().click({ force: true, timeout: 2000, noWaitAfter: true });
-      await page.waitForTimeout(1500);
+      // Poll URL until we leave cart page — avoids waitForURL's "next navigation" semantics
+      const pollStart = Date.now();
+      while (Date.now() - pollStart < 3000) {
+        await page.waitForTimeout(100);
+        try { if (!page.url().includes('cart.taobao.com')) break; } catch { /* navigating */ }
+      }
       if (!page.url().includes('cart.taobao.com')) {
         await cleanupMarked(page, preAttr);
         console.log(`[browser] 已点击"结算" (预标记) +${Date.now() - tStart}ms`);
@@ -974,22 +979,28 @@ async function waitForCheckoutPage(page, selectors, timeoutMs = 15000) {
 
     // Already on a known checkout domain (Taobao + Tmall)
     if (url.includes('buy.taobao.com') || url.includes('buy.tmall.com') || url.includes('trade.taobao.com')) {
-      // Wait for the submit button to render AND loading overlay to disappear.
+      // Wait for the submit button to render, dismissing loading overlays.
       // Uses raf polling (~16ms) for minimal latency.
       try {
         await page.waitForFunction(
           () => {
             const text = document.body?.innerText || '';
             if (!text.includes('提交订单')) return false;
-            if (text.includes('加载中')) return false;
-            // Check for visible loading spinners/masks that don't have "加载中" text
+            // Dismiss any visible loading overlays that block the submit button
             const spinners = document.querySelectorAll(
-              '[class*="loading-mod"], [class*="Loading"], .next-feedback-loading, [aria-busy="true"]'
+              '.next-overlay-wrapper, .next-dialog-wrapper, [class*="loading-mod"], [class*="Loading"], .next-feedback-loading, [class*="-loading-mask"], [class*="-loading-overlay"], [aria-busy="true"]'
             );
+            let dismissed = false;
             for (const el of spinners) {
               const s = getComputedStyle(el);
-              if (s.display !== 'none' && s.visibility !== 'hidden') return false;
+              if (s.display === 'none' || s.visibility === 'hidden') continue;
+              const r = el.getBoundingClientRect();
+              if (r.width <= 30 && r.height <= 30) continue;
+              el.style.setProperty('display', 'none', 'important');
+              dismissed = true;
             }
+            if (dismissed) return false; // one more raf cycle to settle
+            if (text.includes('加载中')) return false;
             return true;
           },
           { polling: 'raf', timeout: Math.min(timeoutMs - (Date.now() - startTime), 8000) }
@@ -1118,8 +1129,7 @@ function createSubmitClicker(page) {
     } catch {
       // Page may have navigated after click
     }
-
-    try { await cleanupMarked(page, attr); } catch { /* best-effort */ }
+    // No cleanup needed — next findAndMarkBest call clears old marks via dismissOverlays
   };
 }
 
