@@ -223,29 +223,27 @@ async function findAndMarkBest(page, { keywords, attrName, textMaxLen = 50, chil
       return false;
     }
 
-    // Phase 1: fast scan of button-like elements only (most targets are buttons)
-    const btnLike = document.querySelectorAll('button, a, [role="button"]');
     let best = null;
     let bestScore = -1;
 
-    for (const el of btnLike) {
-      const t = (el.textContent || '').trim();
-      if (!matchesText(t) || isExcluded(t)) continue;
-      const s = score(el, t);
-      if (s > bestScore) { best = el; bestScore = s; }
-      // Short-circuit: a button with exact short text is almost certainly the target
-      if (s > 500 && el.tagName === 'BUTTON' && t.length <= 10) break;
-    }
-
-    // Phase 2: fall back to broader search if no good button found
-    if (!best || bestScore < 100) {
-      const all = document.querySelectorAll('div, span, li, td, label, input[type="button"], input[type="submit"]');
-      for (const el of all) {
+    // Search button-like elements only — text filter first (cheap), then score (expensive)
+    function tryCandidates(list) {
+      for (let i = 0; i < list.length; i++) {
+        const el = list[i];
         const t = (el.textContent || '').trim();
         if (!matchesText(t) || isExcluded(t)) continue;
         const s = score(el, t);
         if (s > bestScore) { best = el; bestScore = s; }
+        // Short-circuit: <button> with short matching text is the target
+        if (el.tagName === 'BUTTON' && t.length <= 10) return true;
       }
+      return false;
+    }
+
+    if (tryCandidates(document.querySelectorAll('button, a, [role="button"]'))) {
+      // found via short-circuit
+    } else if (!best || bestScore < 100) {
+      tryCandidates(document.querySelectorAll('div, span, li, td, label, input[type="button"], input[type="submit"]'));
     }
 
     if (best) { best.setAttribute(attrName, 'true'); return true; }
