@@ -148,65 +148,46 @@ async function findAndMarkBest(page, { keywords, attrName, textMaxLen = 50, chil
       }
     }
 
-    function leafBonus(el, t) {
-      // Fast leaf check: if element has no child elements with same text, it's likely the click target
-      if (el.childElementCount === 0) return 50;
-      // Quick check: direct children only (not deep querySelectorAll)
-      for (const c of el.children) {
-        const ct = (c.textContent || '').trim();
-        if (ct.length <= childMaxLen) {
-          for (const kw of keywords) { if (exact ? ct === kw : ct.includes(kw)) return 0; }
-        }
-      }
-      return 50;
-    }
-
-    function score(el, t) {
-      if (t.length > textMaxLen) return -1;
+    function score(el) {
       const style = getComputedStyle(el);
       if (style.display === 'none' || style.visibility === 'hidden') return -1;
       const r = el.getBoundingClientRect();
       if (r.width === 0 && r.height === 0) return -1;
       const tag = el.tagName.toLowerCase();
+      const t = (el.textContent || '').trim();
       let s = (100 - Math.min(t.length, 100));
       if (tag === 'button') s += 300;
       else if (tag === 'a') s += 200;
       else if (el.getAttribute('role') === 'button') s += 100;
-      s += leafBonus(el, t);
+      // Bonus for elements with no matching-text children (leaf nodes)
+      const children = el.querySelectorAll('*');
+      let hasMatchingChild = false;
+      for (const child of children) {
+        const ct = (child.textContent || '').trim();
+        if (ct.length > childMaxLen) continue;
+        for (const kw of keywords) { if (exact ? ct === kw : ct.includes(kw)) { hasMatchingChild = true; break; } }
+        if (hasMatchingChild) break;
+      }
+      if (!hasMatchingChild) s += 50;
       return s;
     }
 
-    function matchesText(t) {
-      for (const kw of keywords) { if (exact ? t === kw : t.includes(kw)) return true; }
-      return false;
-    }
-
-    function isExcluded(t) {
-      for (const et of excludeTexts) { if (t.includes(et)) return true; }
-      return false;
-    }
-
+    const all = document.querySelectorAll('*');
     let best = null;
     let bestScore = -1;
 
-    // Search button-like elements only — text filter first (cheap), then score (expensive)
-    function tryCandidates(list) {
-      for (let i = 0; i < list.length; i++) {
-        const el = list[i];
-        const t = (el.textContent || '').trim();
-        if (!matchesText(t) || isExcluded(t)) continue;
-        const s = score(el, t);
-        if (s > bestScore) { best = el; bestScore = s; }
-        // Short-circuit: <button> with short matching text is the target
-        if (el.tagName === 'BUTTON' && t.length <= 10) return true;
-      }
-      return false;
-    }
-
-    if (tryCandidates(document.querySelectorAll('button, a, [role="button"]'))) {
-      // found via short-circuit
-    } else if (!best || bestScore < 100) {
-      tryCandidates(document.querySelectorAll('div, span, li, td, label, input[type="button"], input[type="submit"]'));
+    for (const el of all) {
+      if (el.tagName === 'BODY' || el.tagName === 'HTML' || el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+      const t = (el.textContent || '').trim();
+      if (t.length > textMaxLen) continue;
+      let excluded = false;
+      for (const et of excludeTexts) { if (t.includes(et)) { excluded = true; break; } }
+      if (excluded) continue;
+      let matches = false;
+      for (const kw of keywords) { if (exact ? t === kw : t.includes(kw)) { matches = true; break; } }
+      if (!matches) continue;
+      const s = score(el);
+      if (s > bestScore) { best = el; bestScore = s; }
     }
 
     if (best) { best.setAttribute(attrName, 'true'); return true; }

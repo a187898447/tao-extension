@@ -84,7 +84,7 @@ async function retryClick(page, config, checkFn, clickSelector) {
       if (dynamicClicker) {
         try {
           await dynamicClicker();
-          await page.waitForTimeout(15);
+          await page.waitForTimeout(30);
         } catch (err) {
           // Navigation / context-destroyed errors are normal (order submitted → redirect)
           if (!clickFailedLogged && !err.message.includes('Execution context was destroyed')
