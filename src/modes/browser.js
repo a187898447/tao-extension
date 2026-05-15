@@ -333,47 +333,42 @@ async function detectCheckoutButton(page, _selectors) {
 }
 
 /**
- * Click the pre-detected checkout button immediately without re-running
- * the full strategy search. Falls back to clickCheckoutButton if the
- * marked element is gone.
+ * Click the checkout button. Tries the pre-marked element first (fast path
+ * from prepare phase), then falls back to full strategy search.
  */
 async function clickDetectedCheckoutButton(page, selectors) {
   const tStart = Date.now();
-  const attr = 'data-tao-checkout-ready';
-  const locator = page.locator(`[${attr}="true"]`);
-  const count = await locator.count();
+  const preAttr = 'data-tao-checkout-ready';
 
-  if (count > 0) {
-    try {
-      await locator.first().click({ force: true, timeout: 3000, noWaitAfter: true });
-      const clickMs = Date.now() - tStart;
-      await cleanupMarked(page, attr);
+  // Fast path: try pre-marked element from prepare phase
+  try {
+    const preBtn = page.locator(`[${preAttr}="true"]`);
+    if (await preBtn.count() > 0) {
+      await preBtn.first().click({ force: true, timeout: 2000, noWaitAfter: true });
       await page.waitForTimeout(1500);
       if (!page.url().includes('cart.taobao.com')) {
-        console.log(`[browser] 已点击"结算" (预检测快速通道) +${clickMs}ms`);
-        writeSuccessLog(['checkout strategy: pre-detected fast path', `elapsed: ${clickMs}ms`, `url: ${page.url()}`]);
+        await cleanupMarked(page, preAttr);
+        console.log(`[browser] 已点击"结算" (预标记) +${Date.now() - tStart}ms`);
         return;
       }
-      console.log(`[browser] 预检测按钮点击后未跳转 +${Date.now() - tStart}ms，回退完整搜索...`);
-    } catch (e) {
-      await cleanupMarked(page, attr);
-      console.log(`[browser] 预检测按钮点击失败 +${Date.now() - tStart}ms: ${e.message}，回退完整搜索...`);
+      await cleanupMarked(page, preAttr);
+      console.log(`[browser] 预标记点击未跳转 +${Date.now() - tStart}ms，回退搜索...`);
     }
-  } else {
-    console.log(`[browser] 预检测标记不存在 +${Date.now() - tStart}ms，回退完整搜索...`);
-  }
+  } catch { /* pre-marked element gone */ }
 
-  // Fallback: run the full multi-strategy click
-  await clickCheckoutButton(page, selectors);
+  // Fallback: run the full multi-strategy click (skip its internal wait since we're already on the cart page)
+  await clickCheckoutButton(page, selectors, true);
 }
 
 /**
  * Click the checkout button on the cart page using multiple fallback strategies.
  * Throws if no button can be found or clicked.
  */
-async function clickCheckoutButton(page, selectors) {
-  // Wait for cart page to render (SPA)
-  await page.waitForTimeout(1500);
+async function clickCheckoutButton(page, selectors, skipWait = false) {
+  // Wait for cart page to render (SPA), unless we're already on it
+  if (!skipWait) {
+    await page.waitForTimeout(1500);
+  }
 
   const tStart = Date.now();
   const frames = page.frames();
@@ -854,7 +849,13 @@ async function purchaseViaCart(context, config) {
  * Check the current page state to determine outcome.
  */
 async function checkPageResult(page, config) {
-  const url = page.url();
+  let url;
+  try {
+    url = page.url();
+  } catch {
+    // Page is navigating — context destroyed, retry
+    return { success: false, retryable: true, reason: 'navigating' };
+  }
 
   // Fast path: check URL first (no evaluate overhead)
   const successConf = (config.selectors && config.selectors.success) || {};
@@ -874,17 +875,23 @@ async function checkPageResult(page, config) {
   const soldOutTexts = terminalConf.sold_out || ['已售罄', '卖完了', '库存不足', '已抢光'];
   const delistedTexts = terminalConf.delisted || ['商品已下架', '不存在', '已失效'];
 
-  const verdict = await page.evaluate(
-    ({ successTexts, soldOutTexts, delistedTexts }) => {
-      const text = document.body?.innerText || '';
-      for (const t of successTexts) { if (text.includes(t)) return 'success'; }
-      for (const t of soldOutTexts) { if (text.includes(t)) return 'sold_out'; }
-      for (const t of delistedTexts) { if (text.includes(t)) return 'delisted'; }
-      if (text.includes('请登录')) return 'login_expired';
-      return 'blocked';
-    },
-    { successTexts, soldOutTexts, delistedTexts }
-  );
+  let verdict;
+  try {
+    verdict = await page.evaluate(
+      ({ successTexts, soldOutTexts, delistedTexts }) => {
+        const text = document.body?.innerText || '';
+        for (const t of successTexts) { if (text.includes(t)) return 'success'; }
+        for (const t of soldOutTexts) { if (text.includes(t)) return 'sold_out'; }
+        for (const t of delistedTexts) { if (text.includes(t)) return 'delisted'; }
+        if (text.includes('请登录')) return 'login_expired';
+        return 'blocked';
+      },
+      { successTexts, soldOutTexts, delistedTexts }
+    );
+  } catch {
+    // Page navigating — evaluate context destroyed, retry
+    return { success: false, retryable: true, reason: 'navigating' };
+  }
 
   if (verdict === 'success') return { success: true };
   if (verdict === 'sold_out') return { success: false, retryable: false, reason: 'sold out' };
