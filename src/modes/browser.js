@@ -120,8 +120,23 @@ async function purchaseViaProductPage(context, config) {
  *
  * Returns true if a matching element was found and marked.
  */
-async function findAndMarkBest(page, { keywords, attrName, textMaxLen = 50, childMaxLen = 50, excludeTexts = [], exact = false }) {
-  return page.evaluate(({ keywords, attrName, textMaxLen, childMaxLen, excludeTexts, exact }) => {
+async function findAndMarkBest(page, { keywords, attrName, textMaxLen = 50, childMaxLen = 50, excludeTexts = [], exact = false, dismissOverlays = false }) {
+  return page.evaluate(({ keywords, attrName, textMaxLen, childMaxLen, excludeTexts, exact, dismissOverlays }) => {
+    if (dismissOverlays) {
+      // Clear previous marks
+      document.querySelectorAll(`[${attrName}]`).forEach(el => el.removeAttribute(attrName));
+      // Dismiss loading overlays that intercept clicks
+      const candidates = document.querySelectorAll(
+        '.next-overlay-wrapper, .next-dialog-wrapper, [class*="-loading-mask"], [class*="-loading-overlay"]'
+      );
+      for (const el of candidates) {
+        const s = getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden') continue;
+        const r = el.getBoundingClientRect();
+        if (r.width > 60 && r.height > 60) el.style.setProperty('display', 'none', 'important');
+      }
+    }
+
     function score(el) {
       const style = getComputedStyle(el);
       if (style.display === 'none' || style.visibility === 'hidden') return -1;
@@ -166,7 +181,7 @@ async function findAndMarkBest(page, { keywords, attrName, textMaxLen = 50, chil
 
     if (best) { best.setAttribute(attrName, 'true'); return true; }
     return false;
-  }, { keywords, attrName, textMaxLen, childMaxLen, excludeTexts, exact });
+  }, { keywords, attrName, textMaxLen, childMaxLen, excludeTexts, exact, dismissOverlays });
 }
 
 function cleanupMarked(page, attrName) {
@@ -1063,22 +1078,6 @@ async function browserPurchase(config) {
 function createSubmitClicker(page) {
   const attr = 'data-tao-submit-dyn';
   return async () => {
-    // Dismiss any loading overlays before clicking — hidden overlays still
-    // intercept Playwright coordinate clicks even if visually transparent.
-    try {
-      await page.evaluate(() => {
-        const overlays = document.querySelectorAll(
-          '[class*="loading"], [class*="Loading"], [class*="mask"], [class*="overlay"], [class*="spinner"], .next-feedback-loading'
-        );
-        for (const el of overlays) {
-          const s = getComputedStyle(el);
-          if (s.display !== 'none' && s.visibility !== 'hidden') {
-            el.style.setProperty('display', 'none', 'important');
-          }
-        }
-      });
-    } catch { /* best-effort */ }
-
     let found = false;
     try {
       found = await findAndMarkBest(page, {
@@ -1086,6 +1085,7 @@ function createSubmitClicker(page) {
         attrName: attr,
         textMaxLen: 30,
         childMaxLen: 30,
+        dismissOverlays: true,
       });
     } catch {
       return;
