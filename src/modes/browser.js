@@ -139,20 +139,45 @@ async function findAndMarkBest(page, { keywords, attrName, textMaxLen = 50, chil
           const r = el.getBoundingClientRect();
           if (r.width <= 30 || r.height <= 30) continue;
 
-          // For dialogs with confirm buttons, try to click the button first
+          // For dialogs with confirm/close buttons, click to dismiss first
           const text = (el.textContent || '').trim();
-          if (text.includes('网络拥挤') || text.includes('繁忙') || text.includes('稍后再试')
-              || text.includes('我知道了') || text.includes('确定') || text.includes('知道了')) {
-            const btns = el.querySelectorAll('button, a, [role="button"], .next-btn, .btn');
-            for (const btn of btns) {
-              const bt = (btn.textContent || '').trim();
-              if (bt.includes('确定') || bt.includes('我知道了') || bt.includes('知道了') || bt.includes('关闭')) {
-                btn.click();
-                break;
+          const isBusyDialog = text.includes('网络拥挤') || text.includes('繁忙')
+            || text.includes('稍后再试') || text.includes('拥挤');
+          const isConfirmDialog = text.includes('我知道了') || text.includes('确定')
+            || text.includes('知道了');
+
+          if (isBusyDialog || isConfirmDialog) {
+            // Try close buttons by class name (X button, often no text)
+            const closeBtn = el.querySelector(
+              '.next-dialog-close, .ui-dialog-close, .close, [class*="close"], [class*="Close"]'
+            );
+            if (closeBtn) {
+              closeBtn.click();
+            } else {
+              // Try text-based buttons
+              const btns = el.querySelectorAll('button, a, [role="button"], .next-btn, .btn');
+              let clicked = false;
+              for (const btn of btns) {
+                const bt = (btn.textContent || '').trim();
+                if (bt.includes('确定') || bt.includes('我知道了') || bt.includes('知道了')
+                    || bt.includes('关闭') || bt === '×' || bt === '✕') {
+                  btn.click();
+                  clicked = true;
+                  break;
+                }
+              }
+              // Fallback: click the smallest button (likely the X close button)
+              if (!clicked && btns.length > 0) {
+                let smallest = btns[0];
+                let smallestSize = Infinity;
+                for (const btn of btns) {
+                  const br = btn.getBoundingClientRect();
+                  const area = br.width * br.height;
+                  if (area > 0 && area < smallestSize) { smallest = btn; smallestSize = area; }
+                }
+                smallest.click();
               }
             }
-            // Click the first button as fallback
-            if (btns.length === 1) btns[0].click();
           }
 
           el.style.setProperty('display', 'none', 'important');
