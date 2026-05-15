@@ -10,25 +10,26 @@ const CAPTURE_DIR = path.join(os.homedir(), '.taobao-tool', 'captures');
 /**
  * Set up Playwright network interception to capture order-related requests.
  */
-async function setupNetworkCapture(page, captureFile) {
+function setupNetworkCapture(page, captureFile) {
   const capturedRequests = [];
 
   page.on('request', (request) => {
     const url = request.url();
-    // Capture requests related to ordering — match Taobao-specific endpoints
+    const method = request.method();
+    // Capture all Taobao/Tmall/Alipay POSTs + any order-path requests
+    const isTaobaoDomain = url.includes('.taobao.com') || url.includes('.tmall.com');
+    const isAlipayDomain = url.includes('.alipay.com');
+    const isOrderPath = url.includes('/order/') || url.includes('/trade/')
+      || url.includes('submitOrder') || url.includes('createOrder')
+      || url.includes('confirm') || url.includes('buy.');
     if (
-      url.includes('buy.taobao.com') ||
-      url.includes('buy.tmall.com') ||
-      url.includes('trade.taobao.com') ||
-      url.includes('trade.tmall.com') ||
-      url.includes('/order/') ||
-      url.includes('submitOrder') ||
-      url.includes('createOrder') ||
-      url.includes('/trade/')
+      (isTaobaoDomain && (method === 'POST' || isOrderPath)) ||
+      (isAlipayDomain && method === 'POST') ||
+      isOrderPath
     ) {
       capturedRequests.push({
         url: request.url(),
-        method: request.method(),
+        method,
         headers: request.headers(),
         postData: request.postData(),
         timestamp: Date.now(),
