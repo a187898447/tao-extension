@@ -979,19 +979,21 @@ async function checkPageResult(page, config) {
   const terminalConf = (config.selectors && config.selectors.blocking && config.selectors.blocking.terminal) || {};
   const soldOutTexts = terminalConf.sold_out || ['已售罄', '卖完了', '库存不足', '已抢光'];
   const delistedTexts = terminalConf.delisted || ['商品已下架', '不存在', '已失效'];
+  const networkBusyTexts = ['网络异常', '系统繁忙', '网络拥挤', '人数较多', '稍后再试', '挤爆了'];
 
   let verdict;
   try {
     verdict = await page.evaluate(
-      ({ successTexts, soldOutTexts, delistedTexts }) => {
+      ({ successTexts, soldOutTexts, delistedTexts, networkBusyTexts }) => {
         const text = document.body?.innerText || '';
         for (const t of successTexts) { if (text.includes(t)) return 'success'; }
         for (const t of soldOutTexts) { if (text.includes(t)) return 'sold_out'; }
         for (const t of delistedTexts) { if (text.includes(t)) return 'delisted'; }
         if (text.includes('请登录')) return 'login_expired';
+        for (const t of networkBusyTexts) { if (text.includes(t)) return 'network_busy'; }
         return 'blocked';
       },
-      { successTexts, soldOutTexts, delistedTexts }
+      { successTexts, soldOutTexts, delistedTexts, networkBusyTexts }
     );
   } catch {
     // Page navigating — evaluate context destroyed, retry
@@ -999,9 +1001,29 @@ async function checkPageResult(page, config) {
   }
 
   if (verdict === 'success') return { success: true };
-  if (verdict === 'sold_out') return { success: false, retryable: false, reason: 'sold out' };
   if (verdict === 'delisted') return { success: false, retryable: false, reason: 'delisted' };
   if (verdict === 'login_expired') return { success: false, retryable: false, reason: 'login expired' };
+
+  // Sold out during flash sale is often transient (inventory fluctuates, server overload).
+  // Keep retrying for a grace period before accepting defeat.
+  if (verdict === 'sold_out') {
+    const soldOutGraceMs = config.soldOutGraceMs || 5000;
+    const now = Date.now();
+    if (!config._soldOutFirstSeen) {
+      config._soldOutFirstSeen = now;
+      console.log(`[check] 检测到售罄，将持续重试 ${soldOutGraceMs / 1000}s...`);
+    }
+    if (now - config._soldOutFirstSeen < soldOutGraceMs) {
+      return { success: false, retryable: true, reason: 'sold out (retrying)' };
+    }
+    return { success: false, retryable: false, reason: 'sold out' };
+  }
+
+  // Network busy on the page (not dialog) — explicitly log and retry
+  if (verdict === 'network_busy') {
+    return { success: false, retryable: true, reason: 'network busy' };
+  }
+
   return { success: false, retryable: true, reason: 'blocked' };
 }
 

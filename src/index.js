@@ -252,6 +252,55 @@ program
               return { success: false, reason: 'did not reach checkout page' };
             }
 
+            // Submit button may already be active (sale started early, cached page, etc.).
+            // Try a few quick clicks first; if they fail, refresh the page near target time.
+            const serverNow = () => Date.now() + timeOffset;
+            const timeUntilTarget = targetTime.getTime() - serverNow();
+            console.log(`[tao] 结算页就绪，距目标时间: ${timeUntilTarget}ms`);
+            if (timeUntilTarget > 500) {
+              console.log(`[tao] 提前到达结算页 (距目标 ${timeUntilTarget}ms)，先快速试探提交按钮...`);
+              const submitClicker = createSubmitClicker(page);
+              const tProbe = Date.now();
+              for (let i = 0; i < 20 && serverNow() < targetTime.getTime() - 500; i++) {
+                try { await submitClicker(); } catch {}
+                const check = await checkPageResult(page, config);
+                if (check.success) {
+                  const elapsed = Date.now() - tProbe;
+                  console.log('[tao] 提前提交成功！');
+                  writeTimingLog(elapsed, i + 1, (i + 1) / (elapsed / 1000));
+                  await browser.close();
+                  return { success: true, attempts: i + 1 };
+                }
+                if (!check.retryable) {
+                  console.error(`[tao] 提前试探遇到终局错误: ${check.reason}`);
+                  await browser.close();
+                  return { success: false, reason: check.reason };
+                }
+                await new Promise(r => setTimeout(r, 100));
+              }
+
+              // Button not active yet — wait and refresh
+              const remaining = targetTime.getTime() - serverNow();
+              if (remaining > 500) {
+                const waitMs = remaining - 300;
+                console.log(`[tao] 按钮未就绪，等待 ${waitMs}ms 后刷新页面...`);
+                await new Promise(r => setTimeout(r, waitMs));
+                console.log('[tao] 刷新结算页以激活提交按钮...');
+                try {
+                  await page.reload({ waitUntil: 'domcontentloaded', timeout: 5000 });
+                } catch {
+                  console.log('[tao] 刷新失败，继续尝试...');
+                }
+                const stillOnCheckout = await waitForCheckoutPage(page, allSelectors);
+                if (!stillOnCheckout) {
+                  console.error('[browser] 刷新后未能回到确认订单页面');
+                  await browser.close();
+                  return { success: false, reason: 'lost checkout page after refresh' };
+                }
+                console.log('[tao] 结算页已刷新，提交按钮应已激活');
+              }
+            }
+
             let capture = null;
             if (config.capture) {
               capture = setupNetworkCapture(page);
