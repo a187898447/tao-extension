@@ -126,7 +126,7 @@ async function findAndMarkBest(page, { keywords, attrName, textMaxLen = 50, chil
       // Clear previous marks
       document.querySelectorAll(`[${attrName}]`).forEach(el => el.removeAttribute(attrName));
 
-      // Dismiss visible overlays that intercept clicks (single combined scan)
+      // Dismiss visible blocking dialogs that intercept clicks
       const overlays = document.querySelectorAll(
         '.next-overlay-wrapper, .next-dialog-wrapper, [class*="-loading-mask"], [class*="-loading-overlay"]'
       );
@@ -135,16 +135,24 @@ async function findAndMarkBest(page, { keywords, attrName, textMaxLen = 50, chil
         if (r.width <= 30 && r.height <= 30) continue;
         const s = getComputedStyle(el);
         if (s.display === 'none' || s.visibility === 'hidden') continue;
-        el.style.setProperty('display', 'none', 'important');
-        // If this is a busy/confirm dialog, click its dismiss button too
         const text = (el.textContent || '').trim();
-        if (text.includes('网络拥挤') || text.includes('繁忙') || text.includes('稍后再试')
-            || text.includes('我知道了') || text.includes('知道了')) {
-          const btn = el.querySelector(
-            '.next-dialog-close, .ui-dialog-close, .close, [class*="close"], [class*="Close"]'
+        const isBlocking = text.includes('网络拥挤') || text.includes('网络异常')
+          || text.includes('繁忙') || text.includes('拥挤') || text.includes('稍后再试')
+          || text.includes('人数较多') || text.includes('系统繁忙')
+          || text.includes('我知道了') || text.includes('知道了') || text.includes('确定');
+        if (!isBlocking) continue;
+        // Click dismiss button first — properly closes React-controlled dialogs
+        let btn = el.querySelector(
+          '.next-dialog-close, .ui-dialog-close, .close, [class*="close"], [class*="Close"]'
+        );
+        if (!btn) {
+          btn = el.querySelector(
+            'button, .next-btn, .ui-btn, [class*="btn"], [class*="Btn"], [role="button"]'
           );
-          if (btn) btn.click();
         }
+        if (btn) btn.click();
+        // Always hide as fallback
+        el.style.setProperty('display', 'none', 'important');
       }
     }
 
@@ -199,6 +207,47 @@ function cleanupMarked(page, attrName) {
   return page.evaluate((name) => {
     document.querySelectorAll(`[${name}]`).forEach(el => el.removeAttribute(name));
   }, attrName);
+}
+
+/**
+ * Dismiss visible blocking dialogs (network busy, error prompts, etc.).
+ * Clicks the dismiss/confirm button to properly close React-controlled dialogs,
+ * then hides the overlay as a fallback.
+ * Returns the number of dialogs dismissed.
+ */
+function dismissDialogs(page) {
+  return page.evaluate(() => {
+    const overlays = document.querySelectorAll(
+      '.next-overlay-wrapper, .next-dialog-wrapper, [class*="-loading-mask"], [class*="-loading-overlay"]'
+    );
+    let dismissed = 0;
+    for (const el of overlays) {
+      const r = el.getBoundingClientRect();
+      if (r.width <= 30 && r.height <= 30) continue;
+      const s = getComputedStyle(el);
+      if (s.display === 'none' || s.visibility === 'hidden') continue;
+      const text = (el.textContent || '').trim();
+      const isBlocking = text.includes('网络拥挤') || text.includes('网络异常')
+        || text.includes('繁忙') || text.includes('拥挤') || text.includes('稍后再试')
+        || text.includes('人数较多') || text.includes('系统繁忙')
+        || text.includes('我知道了') || text.includes('知道了') || text.includes('确定');
+      if (!isBlocking) continue;
+      // Click dismiss button first — properly closes React-controlled dialogs
+      let btn = el.querySelector(
+        '.next-dialog-close, .ui-dialog-close, .close, [class*="close"], [class*="Close"]'
+      );
+      // Fall back to confirm button (e.g. "我知道了", "确定")
+      if (!btn) {
+        btn = el.querySelector(
+          'button, .next-btn, .ui-btn, [class*="btn"], [class*="Btn"], [role="button"]'
+        );
+      }
+      if (btn) { btn.click(); dismissed++; }
+      // Always hide as fallback in case click didn't fully close it
+      el.style.setProperty('display', 'none', 'important');
+    }
+    return dismissed;
+  });
 }
 
 /**
@@ -333,21 +382,26 @@ async function detectCheckoutButton(page, _selectors) {
 }
 
 /**
- * Click the checkout button. Tries the pre-marked element first (fast path
- * from prepare phase), then falls back to full strategy search.
+ * Click the checkout button with retry loop.
+ * Keeps retrying (dismiss dialogs → click pre-marked button → check nav)
+ * to survive network-busy dialogs that block the checkout transition.
+ * Full strategy search is only used once as a one-shot fallback.
  */
 async function clickDetectedCheckoutButton(page, selectors) {
   const tStart = Date.now();
   const preAttr = 'data-tao-checkout-ready';
+  const deadline = Date.now() + 10000;
 
-  // Fast path: try pre-marked element from prepare phase
+  // Dismiss any blocking dialogs before first attempt
+  try { await dismissDialogs(page); } catch { /* page may be navigating */ }
+
+  // --- First attempt: pre-marked fast path ---
   try {
     const preBtn = page.locator(`[${preAttr}="true"]`);
     if (await preBtn.count() > 0) {
       await preBtn.first().click({ force: true, timeout: 2000, noWaitAfter: true });
-      // Poll URL until we leave cart page — avoids waitForURL's "next navigation" semantics
       const pollStart = Date.now();
-      while (Date.now() - pollStart < 3000) {
+      while (Date.now() - pollStart < 1500) {
         await page.waitForTimeout(100);
         try { if (!page.url().includes('cart.taobao.com')) break; } catch { /* navigating */ }
       }
@@ -357,12 +411,59 @@ async function clickDetectedCheckoutButton(page, selectors) {
         return;
       }
       await cleanupMarked(page, preAttr);
-      console.log(`[browser] 预标记点击未跳转 +${Date.now() - tStart}ms，回退搜索...`);
     }
   } catch { /* pre-marked element gone */ }
 
-  // Fallback: run the full multi-strategy click (skip its internal wait since we're already on the cart page)
-  await clickCheckoutButton(page, selectors, true);
+  // --- One-shot fallback: full multi-strategy search ---
+  console.log(`[browser] 预标记未命中 +${Date.now() - tStart}ms，尝试完整搜索...`);
+  try {
+    await clickCheckoutButton(page, selectors, true);
+    console.log(`[browser] 已点击"结算" (策略搜索) +${Date.now() - tStart}ms`);
+    return;
+  } catch (e) {
+    console.log(`[browser] 策略搜索失败: ${e.message.substring(0, 80)}`);
+  }
+
+  // --- Retry loop: dismiss dialogs + re-click pre-marked button only ---
+  while (Date.now() < deadline) {
+    try { await dismissDialogs(page); } catch { /* navigating */ }
+
+    try {
+      if (!page.url().includes('cart.taobao.com')) {
+        console.log(`[browser] 已离开购物车 +${Date.now() - tStart}ms`);
+        return;
+      }
+    } catch { /* navigating */ }
+
+    // Re-detect and click checkout button
+    const attr = 'data-tao-checkout-retry';
+    try {
+      const found = await findAndMarkBest(page, {
+        keywords: ['结算', '去结算'],
+        attrName: attr,
+        textMaxLen: 20,
+        childMaxLen: 20,
+        excludeTexts: ['明细', '优惠', '合计', '减免', '已售', '下架', '失效'],
+        dismissOverlays: true,
+      });
+      if (found) {
+        await page.locator(`[${attr}="true"]`).first().click({ force: true, timeout: 2000, noWaitAfter: true });
+        const pollStart = Date.now();
+        while (Date.now() - pollStart < 1500) {
+          await page.waitForTimeout(100);
+          try { if (!page.url().includes('cart.taobao.com')) break; } catch { /* navigating */ }
+        }
+        if (!page.url().includes('cart.taobao.com')) {
+          console.log(`[browser] 已点击"结算" (retry) +${Date.now() - tStart}ms`);
+          return;
+        }
+      }
+    } catch { /* element gone, retry */ }
+
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  throw new Error(`结算按钮重试超时 (${Date.now() - tStart}ms)`);
 }
 
 /**
@@ -400,6 +501,7 @@ async function clickCheckoutButton(page, selectors, skipWait = false) {
     textMaxLen: 30,
     childMaxLen: 30,
     excludeTexts: ['已售', '下架', '失效'],
+    dismissOverlays: true,
   });
 
   if (found) {
@@ -513,7 +615,6 @@ async function clickCheckoutButton(page, selectors, skipWait = false) {
       const candidates = await frames[fi].evaluate(() => {
         const results = [];
         const keywords = ['结算', '去结算', '提交订单', '立即购买'];
-        // Search all elements, not just button/a/div
         const all = document.querySelectorAll('*');
         for (const el of all) {
           const t = (el.textContent || '').trim();
@@ -521,7 +622,6 @@ async function clickCheckoutButton(page, selectors, skipWait = false) {
           let matched = false;
           for (const kw of keywords) { if (t.includes(kw)) { matched = true; break; } }
           if (!matched) continue;
-          // Also check element visibility
           const style = getComputedStyle(el);
           results.push({
             tag: el.tagName,
@@ -979,28 +1079,22 @@ async function waitForCheckoutPage(page, selectors, timeoutMs = 15000) {
 
     // Already on a known checkout domain (Taobao + Tmall)
     if (url.includes('buy.taobao.com') || url.includes('buy.tmall.com') || url.includes('trade.taobao.com')) {
-      // Wait for the submit button to render, dismissing loading overlays.
+      // Wait for the submit button to render AND loading overlay to disappear.
       // Uses raf polling (~16ms) for minimal latency.
       try {
         await page.waitForFunction(
           () => {
             const text = document.body?.innerText || '';
             if (!text.includes('提交订单')) return false;
-            // Dismiss any visible loading overlays that block the submit button
+            if (text.includes('加载中')) return false;
+            // Check for visible loading spinners/masks that don't have "加载中" text
             const spinners = document.querySelectorAll(
-              '.next-overlay-wrapper, .next-dialog-wrapper, [class*="loading-mod"], [class*="Loading"], .next-feedback-loading, [class*="-loading-mask"], [class*="-loading-overlay"], [aria-busy="true"]'
+              '[class*="loading-mod"], [class*="Loading"], .next-feedback-loading, [aria-busy="true"]'
             );
-            let dismissed = false;
             for (const el of spinners) {
               const s = getComputedStyle(el);
-              if (s.display === 'none' || s.visibility === 'hidden') continue;
-              const r = el.getBoundingClientRect();
-              if (r.width <= 30 && r.height <= 30) continue;
-              el.style.setProperty('display', 'none', 'important');
-              dismissed = true;
+              if (s.display !== 'none' && s.visibility !== 'hidden') return false;
             }
-            if (dismissed) return false; // one more raf cycle to settle
-            if (text.includes('加载中')) return false;
             return true;
           },
           { polling: 'raf', timeout: Math.min(timeoutMs - (Date.now() - startTime), 8000) }
@@ -1149,5 +1243,6 @@ module.exports = {
   waitForCheckoutPage,
   logCheckoutFailure,
   checkPageResult,
+  dismissDialogs,
   browserPurchase,
 };
