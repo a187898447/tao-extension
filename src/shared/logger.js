@@ -27,4 +27,12 @@ function writeSuccessLog(lines) {
   return writeDiagnostics('success', lines);
 }
 
-module.exports = { writeDiagnostics, writeSuccessLog };
+function writeTimingLog(elapsed, attempts, attemptsPerSec) {
+  return writeDiagnostics('timing', [
+    `retry elapsed: ${elapsed}ms`,
+    `attempts: ${attempts}`,
+    `rate: ${attemptsPerSec}/s`,
+  ]);
+}
+
+module.exports = { writeDiagnostics, writeSuccessLog, writeTimingLog };

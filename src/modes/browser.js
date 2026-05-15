@@ -842,38 +842,28 @@ async function checkPageResult(page, config) {
     return { success: false, retryable: false, reason: 'login expired' };
   }
 
-  // Only read body text when URL doesn't give a definitive answer
-  const bodyText = await page.evaluate(() => document.body?.innerText || '');
-
-  // Check success by text
+  // Text matching inside evaluate — returns short verdict, avoids serializing body text over IPC
   const successTexts = successConf.text_patterns || ['订单提交成功', '付款成功'];
-  for (const pattern of successTexts) {
-    if (bodyText.includes(pattern)) return { success: true };
-  }
+  const terminalConf = (config.selectors && config.selectors.blocking && config.selectors.blocking.terminal) || {};
+  const soldOutTexts = terminalConf.sold_out || ['已售罄', '卖完了', '库存不足', '已抢光'];
+  const delistedTexts = terminalConf.delisted || ['商品已下架', '不存在', '已失效'];
 
-  // Check terminal errors - sold out
-  const terminalTexts = (config.selectors && config.selectors.blocking && config.selectors.blocking.terminal) || {};
-  const soldOutTexts = terminalTexts.sold_out || ['已售罄', '卖完了', '库存不足', '已抢光'];
-  for (const text of soldOutTexts) {
-    if (bodyText.includes(text)) {
-      return { success: false, retryable: false, reason: `sold out: ${text}` };
-    }
-  }
+  const verdict = await page.evaluate(
+    ({ successTexts, soldOutTexts, delistedTexts }) => {
+      const text = document.body?.innerText || '';
+      for (const t of successTexts) { if (text.includes(t)) return 'success'; }
+      for (const t of soldOutTexts) { if (text.includes(t)) return 'sold_out'; }
+      for (const t of delistedTexts) { if (text.includes(t)) return 'delisted'; }
+      if (text.includes('请登录')) return 'login_expired';
+      return 'blocked';
+    },
+    { successTexts, soldOutTexts, delistedTexts }
+  );
 
-  // Check terminal errors - delisted
-  const delistedTexts = terminalTexts.delisted || ['商品已下架', '不存在', '已失效'];
-  for (const text of delistedTexts) {
-    if (bodyText.includes(text)) {
-      return { success: false, retryable: false, reason: `delisted: ${text}` };
-    }
-  }
-
-  // Check login expired via text
-  if (bodyText.includes('请登录')) {
-    return { success: false, retryable: false, reason: 'login expired' };
-  }
-
-  // Any other response → retryable
+  if (verdict === 'success') return { success: true };
+  if (verdict === 'sold_out') return { success: false, retryable: false, reason: 'sold out' };
+  if (verdict === 'delisted') return { success: false, retryable: false, reason: 'delisted' };
+  if (verdict === 'login_expired') return { success: false, retryable: false, reason: 'login expired' };
   return { success: false, retryable: true, reason: 'blocked' };
 }
 

@@ -4,6 +4,7 @@ const { program } = require('commander');
 const { login, checkSession } = require('./shared/auth');
 const { getConfig } = require('./shared/config');
 const { retryClick } = require('./shared/retry');
+const { writeTimingLog } = require('./shared/logger');
 const { createBrowser, injectCookies, navigateAndSelectSku, navigateCart, detectCheckoutButton, waitForCheckoutPage, logCheckoutFailure, browserPurchase, checkPageResult, clickCheckoutButton, clickBuyNowButton, clickDetectedCheckoutButton, createSubmitClicker } = require('./modes/browser');
 const { setupNetworkCapture, apiPurchase, loadApiTemplate } = require('./modes/api');
 const { syncTaobaoTime, parseTargetTime, schedulePurchase } = require('./shared/scheduler');
@@ -102,6 +103,10 @@ program
     try {
       console.log('[tao] 进入重试循环，动态检测并点击提交订单...');
       retryResult = await retryClick(page, config, checkPageResult, submitClicker);
+
+      if (retryResult.success) {
+        writeTimingLog(retryResult.elapsed, retryResult.attempts, retryResult.attemptsPerSec);
+      }
 
       // Save capture data if enabled
       if (capture) {
@@ -258,6 +263,11 @@ program
             let retryResult;
             try {
               retryResult = await retryClick(page, config, checkPageResult, submitClicker);
+
+              if (retryResult.success) {
+                writeTimingLog(retryResult.elapsed, retryResult.attempts, retryResult.attemptsPerSec);
+              }
+
               if (capture) capture.save();
             } finally {
               await browser.close();

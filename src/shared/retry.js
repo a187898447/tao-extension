@@ -115,8 +115,10 @@ async function retryClick(page, config, checkFn, clickSelector) {
     },
   });
 
-  const elapsed = Date.now() - t0;
-  console.log(`[retry] ${result.success ? '成功' : '失败'} | 总耗时:${elapsed}ms 尝试:${result.attempts}`);
+  result.elapsed = Date.now() - t0;
+  result.attemptsPerSec = result.elapsed > 0
+    ? (result.attempts / (result.elapsed / 1000)).toFixed(1) : '0';
+  console.log(`[retry] ${result.success ? '成功' : '失败'} | 总耗时:${result.elapsed}ms 尝试:${result.attempts} (${result.attemptsPerSec}次/秒)`);
   return result;
 }
 
