@@ -276,7 +276,7 @@ program
                   await browser.close();
                   return { success: false, reason: check.reason };
                 }
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, config.retryInterval || 100));
               }
 
               // Button not active yet — wait and refresh

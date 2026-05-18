@@ -10,7 +10,7 @@ const PROJECT_CONFIG_DIR = path.join(__dirname, '..', '..', 'config');
 const DEFAULTS = {
   mode: 'browser',
   retryInterval: 100,
-  retryWindow: 30000,
+  retryWindow: 60000,
   profile: 'default',
   headless: false,
   capture: false,

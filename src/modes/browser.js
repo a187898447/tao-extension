@@ -980,20 +980,24 @@ async function checkPageResult(page, config) {
   const soldOutTexts = terminalConf.sold_out || ['已售罄', '卖完了', '库存不足', '已抢光'];
   const delistedTexts = terminalConf.delisted || ['商品已下架', '不存在', '已失效'];
   const networkBusyTexts = ['网络异常', '系统繁忙', '网络拥挤', '人数较多', '稍后再试', '挤爆了'];
+  const preSaleTexts = ['即将开售', '即将开抢', '未开售', '尚未开售', '等待开售'];
+  const checkoutErrorTexts = ['系统异常', '页面出错', '服务繁忙', '系统错误', '请求失败', '操作失败', '出错啦'];
 
   let verdict;
   try {
     verdict = await page.evaluate(
-      ({ successTexts, soldOutTexts, delistedTexts, networkBusyTexts }) => {
+      ({ successTexts, soldOutTexts, delistedTexts, networkBusyTexts, preSaleTexts, checkoutErrorTexts }) => {
         const text = document.body?.innerText || '';
         for (const t of successTexts) { if (text.includes(t)) return 'success'; }
         for (const t of soldOutTexts) { if (text.includes(t)) return 'sold_out'; }
         for (const t of delistedTexts) { if (text.includes(t)) return 'delisted'; }
         if (text.includes('请登录')) return 'login_expired';
+        for (const t of preSaleTexts) { if (text.includes(t)) return 'presale'; }
         for (const t of networkBusyTexts) { if (text.includes(t)) return 'network_busy'; }
+        for (const t of checkoutErrorTexts) { if (text.includes(t)) return 'checkout_error'; }
         return 'blocked';
       },
-      { successTexts, soldOutTexts, delistedTexts, networkBusyTexts }
+      { successTexts, soldOutTexts, delistedTexts, networkBusyTexts, preSaleTexts, checkoutErrorTexts }
     );
   } catch {
     // Page navigating — evaluate context destroyed, retry
@@ -1001,27 +1005,83 @@ async function checkPageResult(page, config) {
   }
 
   if (verdict === 'success') return { success: true };
-  if (verdict === 'delisted') return { success: false, retryable: false, reason: 'delisted' };
   if (verdict === 'login_expired') return { success: false, retryable: false, reason: 'login expired' };
 
-  // Sold out during flash sale is often transient (inventory fluctuates, server overload).
-  // Keep retrying for a grace period before accepting defeat.
+  // Pre-sale: items not yet released, submit button not functional.
+  // Refresh once to try activating the button when sale starts.
+  if (verdict === 'presale') {
+    if (!config._preSaleRefreshed) {
+      config._preSaleRefreshed = true;
+      console.log('[check] 检测到预售状态，刷新页面...');
+      try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 8000 }); } catch (e) {
+        console.log(`[check] 刷新失败: ${e.message}`);
+      }
+    }
+    return { success: false, retryable: true, reason: 'pre-sale' };
+  }
+
+  // Sold out: keep retrying — submit button may still work for remaining items
   if (verdict === 'sold_out') {
-    const soldOutGraceMs = config.soldOutGraceMs || 5000;
-    const now = Date.now();
-    if (!config._soldOutFirstSeen) {
-      config._soldOutFirstSeen = now;
-      console.log(`[check] 检测到售罄，将持续重试 ${soldOutGraceMs / 1000}s...`);
-    }
-    if (now - config._soldOutFirstSeen < soldOutGraceMs) {
-      return { success: false, retryable: true, reason: 'sold out (retrying)' };
-    }
-    return { success: false, retryable: false, reason: 'sold out' };
+    return { success: false, retryable: true, reason: 'sold out' };
+  }
+
+  // Delisted: similar to sold-out, only some items may be delisted
+  if (verdict === 'delisted') {
+    return { success: false, retryable: true, reason: 'delisted' };
   }
 
   // Network busy on the page (not dialog) — explicitly log and retry
   if (verdict === 'network_busy') {
     return { success: false, retryable: true, reason: 'network busy' };
+  }
+
+  // Checkout page error — retry, refresh page after 15 attempts
+  if (verdict === 'checkout_error') {
+    if (!config._checkoutErrorCount) config._checkoutErrorCount = 0;
+    config._checkoutErrorCount++;
+    if (config._checkoutErrorCount > 15 && !config._checkoutErrorRefreshed) {
+      config._checkoutErrorRefreshed = true;
+      config._checkoutErrorCount = 0;
+      console.log('[check] 结算页持续报错，刷新页面...');
+      try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 8000 }); } catch (e) {
+        console.log(`[check] 刷新失败: ${e.message}`);
+      }
+    }
+    return { success: false, retryable: true, reason: 'checkout page error' };
+  }
+
+  // Navigation recovery: if we left the checkout/success domain unexpectedly
+  const checkoutDomains = ['buy.taobao.com', 'buy.tmall.com', 'trade.taobao.com', 'order.taobao.com'];
+  const onCheckout = checkoutDomains.some(d => url.includes(d));
+  if (!onCheckout && !config._navRecovered) {
+    config._navRecovered = true;
+    console.log(`[check] 意外离开结算页 (${url})，尝试恢复...`);
+    try {
+      await page.goBack({ waitUntil: 'domcontentloaded', timeout: 5000 });
+      const newUrl = page.url();
+      if (checkoutDomains.some(d => newUrl.includes(d))) {
+        console.log('[check] 已返回结算页');
+        return { success: false, retryable: true, reason: 'navigated back to checkout' };
+      }
+      // Landed on cart page — re-trigger checkout flow
+      if (newUrl.includes('cart.taobao.com')) {
+        console.log('[check] 回到购物车，重新点击结算...');
+        try {
+          await clickDetectedCheckoutButton(page, getSelectors(config));
+          const selectors = getSelectors(config);
+          const backOnCheckout = await waitForCheckoutPage(page, selectors);
+          if (backOnCheckout) {
+            config._navRecovered = false;
+            return { success: false, retryable: true, reason: 're-triggered checkout from cart' };
+          }
+        } catch (e) {
+          console.log(`[check] 重新结算失败: ${e.message}`);
+        }
+      }
+    } catch (e) {
+      console.log(`[check] 返回失败: ${e.message}`);
+    }
+    return { success: false, retryable: false, reason: `lost checkout page: ${url}` };
   }
 
   return { success: false, retryable: true, reason: 'blocked' };
