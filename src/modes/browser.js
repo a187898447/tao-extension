@@ -392,19 +392,15 @@ async function clickDetectedCheckoutButton(page, selectors) {
   const preAttr = 'data-tao-checkout-ready';
   const deadline = Date.now() + 10000;
 
-  // Dismiss any blocking dialogs before first attempt
-  try { await dismissDialogs(page); } catch { /* page may be navigating */ }
-
   // --- First attempt: pre-marked fast path ---
   try {
     const preBtn = page.locator(`[${preAttr}="true"]`);
     if (await preBtn.count() > 0) {
       await preBtn.first().click({ force: true, timeout: 2000, noWaitAfter: true });
-      const pollStart = Date.now();
-      while (Date.now() - pollStart < 1500) {
-        await page.waitForTimeout(100);
-        try { if (!page.url().includes('cart.taobao.com')) break; } catch { /* navigating */ }
-      }
+      // waitForURL with not-pattern — returns as soon as URL leaves cart domain (~50ms granularity)
+      try {
+        await page.waitForURL(url => !url.includes('cart.taobao.com'), { timeout: 2000 });
+      } catch { /* still on cart page after 2s */ }
       if (!page.url().includes('cart.taobao.com')) {
         await cleanupMarked(page, preAttr);
         console.log(`[browser] 已点击"结算" (预标记) +${Date.now() - tStart}ms`);
@@ -448,11 +444,9 @@ async function clickDetectedCheckoutButton(page, selectors) {
       });
       if (found) {
         await page.locator(`[${attr}="true"]`).first().click({ force: true, timeout: 2000, noWaitAfter: true });
-        const pollStart = Date.now();
-        while (Date.now() - pollStart < 1500) {
-          await page.waitForTimeout(100);
-          try { if (!page.url().includes('cart.taobao.com')) break; } catch { /* navigating */ }
-        }
+        try {
+          await page.waitForURL(url => !url.includes('cart.taobao.com'), { timeout: 2000 });
+        } catch { /* still on cart page */ }
         if (!page.url().includes('cart.taobao.com')) {
           console.log(`[browser] 已点击"结算" (retry) +${Date.now() - tStart}ms`);
           return;
@@ -684,9 +678,12 @@ async function clickBuyNowButton(page, selectors) {
 
   // Helper: after a click, verify we left the product page
   async function verifyNav() {
-    await page.waitForTimeout(1500);
-    const url = page.url();
-    return !url.includes('item.taobao.com') && !url.includes('detail.tmall.com');
+    try {
+      await page.waitForURL(url => !url.includes('item.taobao.com') && !url.includes('detail.tmall.com'), { timeout: 3000 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // Strategy 1: CSS selectors across all frames
