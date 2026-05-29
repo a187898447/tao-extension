@@ -16,6 +16,10 @@ const DEFAULTS = {
   capture: false,
   leadTime: 10000, // browser mode lead time before target (ms)
   checkoutLead: 1000, // ms — click checkout this many ms before target time
+  listingType: 'normal', // 'normal' | 'scheduled' — product link discovery mode
+  searchLead: 15000, // ms — start search polling this many ms before target
+  searchInterval: 200, // ms — interval between search poll attempts
+  searchTimeout: 60000, // ms — give up if product not found within this window
 };
 
 function loadProjectConfig(filename) {
@@ -61,6 +65,27 @@ function mergeConfig(fileConfig, cliOptions) {
   if (cliOptions.checkoutLead !== undefined) {
     const cl = parseInt(cliOptions.checkoutLead, 10);
     if (!isNaN(cl)) merged.checkoutLead = cl;
+  }
+  if (cliOptions.listingType !== undefined) merged.listingType = cliOptions.listingType;
+  if (cliOptions.storeUrl !== undefined) merged.storeUrl = cliOptions.storeUrl;
+  if (cliOptions.searchKeyword !== undefined) merged.searchKeyword = cliOptions.searchKeyword;
+  if (cliOptions.priceRange !== undefined) {
+    const pr = typeof cliOptions.priceRange === 'string'
+      ? JSON.parse(cliOptions.priceRange)
+      : cliOptions.priceRange;
+    merged.priceRange = pr;
+  }
+  if (cliOptions.searchLead !== undefined) {
+    const sl = parseInt(cliOptions.searchLead, 10);
+    if (!isNaN(sl)) merged.searchLead = sl;
+  }
+  if (cliOptions.searchInterval !== undefined) {
+    const si = parseInt(cliOptions.searchInterval, 10);
+    if (!isNaN(si)) merged.searchInterval = si;
+  }
+  if (cliOptions.searchTimeout !== undefined) {
+    const st = parseInt(cliOptions.searchTimeout, 10);
+    if (!isNaN(st)) merged.searchTimeout = st * 1000; // CLI accepts seconds, store as ms
   }
 
   return merged;

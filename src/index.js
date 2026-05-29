@@ -5,7 +5,7 @@ const { login, checkSession } = require('./shared/auth');
 const { getConfig } = require('./shared/config');
 const { retryClick } = require('./shared/retry');
 const { writeTimingLog } = require('./shared/logger');
-const { createBrowser, injectCookies, navigateAndSelectSku, navigateCart, detectCheckoutButton, waitForCheckoutPage, logCheckoutFailure, browserPurchase, checkPageResult, clickCheckoutButton, clickBuyNowButton, clickDetectedCheckoutButton, createSubmitClicker } = require('./modes/browser');
+const { createBrowser, injectCookies, navigateAndSelectSku, navigateCart, detectCheckoutButton, waitForCheckoutPage, logCheckoutFailure, browserPurchase, checkPageResult, clickCheckoutButton, clickBuyNowButton, clickDetectedCheckoutButton, createSubmitClicker, searchAndDiscoverProduct, selectFirstSkuOptions, enterProductFromDiscovery } = require('./modes/browser');
 const { setupNetworkCapture, apiPurchase, loadApiTemplate } = require('./modes/api');
 const { syncTaobaoTime, parseTargetTime, schedulePurchase } = require('./shared/scheduler');
 
@@ -77,6 +77,10 @@ program
 
     // Browser mode
     console.log('[tao] 浏览器模式购买...');
+    if (config.listingType === 'scheduled') {
+      console.error('[tao] 定时上架模式请使用 tao schedule 命令，而非 tao buy');
+      process.exit(1);
+    }
     if (!config.useCart && !config.productUrl) {
       console.error('[tao] 非购物车模式需要提供 --product-url');
       process.exit(1);
@@ -143,6 +147,13 @@ program
   .option('--headless', '无头模式运行浏览器')
   .option('--interactive', '购物车模式下手动勾选商品，按 Enter 继续')
   .option('--checkout-lead <ms>', '结算按钮提前点击时间(毫秒)，默认1000')
+  .option('--listing-type <type>', '商品发现模式: normal (默认) | scheduled (定时上架)')
+  .option('--store-url <url>', '店铺首页 URL (定时上架模式)')
+  .option('--search-keyword <keyword>', '店铺搜索关键词 (定时上架模式)')
+  .option('--price-range <json>', '价格区间，如 {"min":100,"max":200} (定时上架模式)')
+  .option('--search-lead <ms>', '搜索提前时间(毫秒)，默认15000')
+  .option('--search-interval <ms>', '搜索轮询间隔(毫秒)，默认200')
+  .option('--search-timeout <seconds>', '目标时间后继续搜索的时长(秒)，默认60，延迟上架可设更大值')
   .action(async (opts) => {
     if (!opts.at) {
       console.error('[tao] schedule 需要 --at 参数指定目标时间');
@@ -171,7 +182,13 @@ program
 
     // Browser mode needs time to launch + navigate + select SKU/cart items + detect button
     // API mode only needs to validate template (sub-second)
-    const leadTime = config.leadTime || (config.mode === 'browser' ? 10000 : 1000);
+    // Scheduled listing needs extra time for search polling
+    let leadTime = config.leadTime || (config.mode === 'browser' ? 10000 : 1000);
+    if (config.listingType === 'scheduled') {
+      const minLead = (config.searchLead || 5000) + 15000; // searchLead + nav/poll buffer
+      leadTime = Math.max(leadTime, minLead);
+      console.log(`[tao] 定时上架模式，提前准备时间: ${Math.round(leadTime / 1000)}s`);
+    }
     // Interactive cart mode: skip countdown, open browser immediately for manual selection
     const prepareImmediately = !!(config.useCart && config.interactive);
 
@@ -186,8 +203,13 @@ program
         advanceMs: checkoutLead,
         prepare: async () => {
           if (config.mode === 'browser') {
-            if (!config.productUrl && !config.useCart) {
-              throw new Error('浏览器模式需要提供 --product-url');
+            if (!config.productUrl && !config.useCart && config.listingType !== 'scheduled') {
+              throw new Error('浏览器模式需要提供 --product-url 或 --listing-type scheduled');
+            }
+            if (config.listingType === 'scheduled') {
+              if (!config.storeUrl) throw new Error('定时上架模式需要提供 --store-url');
+              if (!config.searchKeyword) throw new Error('定时上架模式需要提供 --search-keyword');
+              if (!config.priceRange) throw new Error('定时上架模式需要提供 --price-range');
             }
             const { browser, context } = await createBrowser(config);
             try {
@@ -196,15 +218,33 @@ program
                 await browser.close();
                 throw new Error('no valid session');
               }
-              const page = await context.newPage();
+              let page = await context.newPage();
               const allSelectors = config.selectors || {};
               if (config.useCart) {
                 await navigateCart(page, allSelectors, !!config.interactive);
-                // Pre-detect checkout button so it's confirmed ready before target time
                 const btnReady = await detectCheckoutButton(page, allSelectors);
                 if (!btnReady) {
                   console.log('[tao] 结算按钮未就绪，将在执行阶段重试查找...');
                 }
+              } else if (config.listingType === 'scheduled') {
+                const matchResult = await searchAndDiscoverProduct(
+                  page,
+                  config.storeUrl,
+                  config.searchKeyword,
+                  config.priceRange,
+                  {
+                    searchLead: config.searchLead,
+                    searchInterval: config.searchInterval,
+                    searchTimeout: config.searchTimeout,
+                    targetTime,
+                    timeOffset,
+                    storeSelectors: allSelectors.store || null,
+                  }
+                );
+                const productPage = await enterProductFromDiscovery(page, matchResult);
+                await selectFirstSkuOptions(productPage);
+                // Update page reference — may have switched to a new tab
+                page = productPage;
               } else {
                 const productSelectors = allSelectors.product || {};
                 const skuOptions = config.sku

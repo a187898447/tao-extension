@@ -29,6 +29,14 @@ blocking:
       - "不存在"
       - "已失效"
 
+# Store search (for scheduled listing type products)
+store:
+  search_input: "input[type='text'], input[type='search'], input[name='q'], input[name='keyword'], .search-input input, #q, #keyword, .ks-search-input, .shop-search input, input[placeholder*='搜索']"
+  search_btn: "button:has-text('搜索'), .search-btn, button[type='submit'], input[type='submit'], .search-btn-wrap button, [class*='search'] button, .ks-search-btn, form button, form input[type='submit']"
+  search_results: ".search-results, .goods-list, .item-list, .J_ItemList, [data-spm='search'] ul, .ks-search-results, .shop-search-results, .J_SearchResult"
+  result_item: ".item, .goods-item, .J_Item, .ks-item, li[data-id], .item-wrap, [data-spm='search'] li, .shop-search-results li, .goods-list > *"
+  result_price: ".price, .c-price, .ks-price, .item-price, strong, em, [class*='price']"
+
 # Success indicators
 success:
   url_patterns:
